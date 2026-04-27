@@ -51,6 +51,18 @@ class TestFormatAdvisoryReport(unittest.TestCase):
         report = format_advisory_report(results)
         self.assertIn("GHSA-aaaa-bbbb-cccc", report)
 
+    def test_multiple_advisories_for_same_package(self):
+        """All advisories for a package should appear in the report."""
+        adv2 = Advisory(
+            advisory_id="CVE-2023-9999",
+            summary="Remote code execution",
+            severity="CVSS_V3",
+        )
+        results = {"django==3.2.0": [self.adv, adv2]}
+        report = format_advisory_report(results)
+        self.assertIn("CVE-2023-1111", report)
+        self.assertIn("CVE-2023-9999", report)
+
 
 class TestFormatJsonReport(unittest.TestCase):
     def test_json_output_structure(self):
