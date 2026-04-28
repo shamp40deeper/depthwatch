@@ -31,7 +31,7 @@ class PackageInfo:
         if not self.required_version or not self.installed_version:
             return False
         if self.required_version.startswith("=="):
-            pinned = self.required_version.lstrip("==").strip()
+            pinned = self.required_version.lstrip("=").strip()
             return pinned != self.installed_version
         return False
 
@@ -45,7 +45,13 @@ def _get_installed_version(package_name: str) -> Optional[str]:
 
 
 def _get_dependencies(package_name: str) -> list[str]:
-    """Return direct dependency names declared by *package_name*."""
+    """Return direct dependency names declared by *package_name*.
+
+    Strips version specifiers and extras from each Requires-Dist entry so that
+    only the bare package name is returned.  Conditional dependencies (those
+    with a PEP 508 environment marker after ";") are included regardless of
+    whether the marker evaluates to True in the current environment.
+    """
     try:
         dist = importlib_metadata.distribution(package_name)
         requires = dist.metadata.get_all("Requires-Dist") or []
