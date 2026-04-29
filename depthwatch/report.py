@@ -1,71 +1,58 @@
-"""Report formatting utilities for depthwatch advisory results."""
+"""Reporting helpers for depthwatch scan results and baseline diffs."""
 
 from __future__ import annotations
 
-from typing import Dict, List
+import json
+from typing import Dict, List, Optional
 
-from depthwatch.advisories import Advisory
+from depthwatch.scanner import ScanResult
 
 
-def format_advisory_report(
-    results: Dict[str, List[Advisory]], show_clean: bool = False
-) -> str:
-    """Format advisory scan results into a human-readable report.
-
-    Args:
-        results: Mapping of "package==version" to list of advisories.
-        show_clean: If True, include packages with no advisories.
-
-    Returns:
-        A formatted string report.
-    """
+def format_advisory_report(result: ScanResult, show_clean: bool = False) -> str:
     lines: List[str] = []
-    lines.append("=" * 60)
-    lines.append(" DepthWatch — Security Advisory Report")
-    lines.append("=" * 60)
-
-    vulnerable_count = 0
-    for pkg_key, advisories in sorted(results.items()):
-        if advisories:
-            vulnerable_count += 1
-            lines.append(f"\n[VULNERABLE] {pkg_key}")
-            for adv in advisories:
-                lines.append(f"  • {adv}")
-                if adv.aliases:
-                    lines.append(f"    Aliases: {', '.join(adv.aliases)}")
-        elif show_clean:
-            lines.append(f"\n[OK]         {pkg_key}")
-
-    lines.append("\n" + "-" * 60)
-    total = len(results)
-    lines.append(
-        f"Scanned {total} package(s). "
-        f"{vulnerable_count} vulnerable, {total - vulnerable_count} clean."
-    )
-    lines.append("=" * 60)
-    return "\n".join(lines)
+    for pkg in result.packages:
+        advisories = pkg.advisories
+        if not advisories and not show_clean:
+            continue
+        status = "VULNERABLE" if advisories else "OK"
+        lines.append(f"  [{status}] {pkg.name} {pkg.installed_version or '?'}")
+        for adv in advisories:
+            lines.append(f"      - {adv}")
+    if not lines:
+        return "No issues found.\n"
+    return "\n".join(lines) + "\n"
 
 
-def format_json_report(results: Dict[str, List[Advisory]]) -> str:
-    """Format advisory scan results as a JSON string.
+def format_json_report(result: ScanResult) -> str:
+    data = [
+        {
+            "name": pkg.name,
+            "required": pkg.required_version,
+            "installed": pkg.installed_version,
+            "drift": pkg.installed_version != pkg.required_version,
+            "advisories": [str(a) for a in pkg.advisories],
+        }
+        for pkg in result.packages
+    ]
+    return json.dumps(data, indent=2)
 
-    Args:
-        results: Mapping of "package==version" to list of advisories.
 
-    Returns:
-        A JSON-encoded string.
-    """
-    import json
+def format_baseline_diff(
+    changes: Dict[str, Dict[str, Optional[str]]],
+    label: str = "Baseline diff",
+) -> str:
+    """Render a human-readable summary of baseline vs current differences."""
+    if not changes:
+        return f"{label}: no changes detected.\n"
 
-    output = {}
-    for pkg_key, advisories in results.items():
-        output[pkg_key] = [
-            {
-                "id": adv.advisory_id,
-                "summary": adv.summary,
-                "severity": adv.severity,
-                "aliases": adv.aliases,
-            }
-            for adv in advisories
-        ]
-    return json.dumps(output, indent=2)
+    lines: List[str] = [f"{label}: {len(changes)} change(s) detected"]
+    for name, versions in sorted(changes.items()):
+        b = versions["baseline"]
+        c = versions["current"]
+        if b is None:
+            lines.append(f"  [ADDED]   {name} -> {c}")
+        elif c is None:
+            lines.append(f"  [REMOVED] {name} (was {b})")
+        else:
+            lines.append(f"  [CHANGED] {name}: {b} -> {c}")
+    return "\n".join(lines) + "\n"
