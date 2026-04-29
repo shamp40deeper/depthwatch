@@ -1,10 +1,9 @@
 """Tests for depthwatch.advisories module."""
 
-from __future__ import annotations
-
+from unittest.mock import patch, MagicMock
 import json
-import unittest
-from unittest.mock import MagicMock, patch
+
+import pytest
 
 from depthwatch.advisories import (
     Advisory,
@@ -14,75 +13,93 @@ from depthwatch.advisories import (
 )
 
 
-class TestAdvisory(unittest.TestCase):
+class TestAdvisory:
     def test_str_with_severity(self):
-        adv = Advisory("CVE-2023-1234", "Remote code execution", severity="CVSS_V3")
-        self.assertIn("CVE-2023-1234", str(adv))
-        self.assertIn("CVSS_V3", str(adv))
+        adv = Advisory("CVE-2023-1234", "A bad bug", severity="HIGH")
+        assert str(adv) == "CVE-2023-1234 [HIGH]: A bad bug"
 
     def test_str_without_severity(self):
-        adv = Advisory("GHSA-xxxx-yyyy-zzzz", "Denial of service")
-        result = str(adv)
-        self.assertIn("GHSA-xxxx-yyyy-zzzz", result)
-        self.assertNotIn("[", result)
+        adv = Advisory("GHSA-xxxx", "Minor issue")
+        assert str(adv) == "GHSA-xxxx: Minor issue"
 
 
-class TestBuildOsvPayload(unittest.TestCase):
+class TestBuildOsvPayload:
     def test_payload_structure(self):
-        payload = json.loads(_build_osv_payload("requests", "2.28.0"))
-        self.assertEqual(payload["version"], "2.28.0")
-        self.assertEqual(payload["package"]["name"], "requests")
-        self.assertEqual(payload["package"]["ecosystem"], "PyPI")
+        payload = _build_osv_payload(["requests==2.28.0"])
+        assert "queries" in payload
+        assert payload["queries"][0]["package"]["name"] == "requests"
+        assert payload["queries"][0]["version"] == "2.28.0"
+
+    def test_payload_without_version(self):
+        payload = _build_osv_payload(["flask"])
+        assert "version" not in payload["queries"][0]
+
+    def test_multiple_packages(self):
+        payload = _build_osv_payload(["django==4.2", "pillow==9.0"])
+        assert len(payload["queries"]) == 2
+
+    def test_ecosystem_is_pypi(self):
+        payload = _build_osv_payload(["numpy==1.24"])
+        assert payload["queries"][0]["package"]["ecosystem"] == "PyPI"
 
 
-class TestParseOsvResponse(unittest.TestCase):
-    def test_empty_response(self):
-        result = _parse_osv_response({})
-        self.assertEqual(result, [])
+class TestParseOsvResponse:
+    _RAW = {
+        "results": [
+            {
+                "vulns": [
+                    {
+                        "id": "GHSA-abcd",
+                        "summary": "Dangerous bug",
+                        "severity": [{"score": "CRITICAL"}],
+                        "aliases": ["CVE-2023-9999"],
+                    }
+                ]
+            },
+            {"vulns": []},
+        ]
+    }
 
-    def test_single_vulnerability(self):
-        data = {
-            "vulns": [
-                {
-                    "id": "GHSA-1234",
-                    "summary": "Test vulnerability",
-                    "aliases": ["CVE-2023-9999"],
-                    "severity": [{"type": "CVSS_V3", "score": "7.5"}],
-                }
-            ]
-        }
-        result = _parse_osv_response(data)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].advisory_id, "GHSA-1234")
-        self.assertEqual(result[0].severity, "CVSS_V3")
-        self.assertIn("CVE-2023-9999", result[0].aliases)
+    def test_returns_advisory_objects(self):
+        result = _parse_osv_response(["requests==2.28", "flask==2.0"], self._RAW)
+        assert len(result["requests"]) == 1
+        assert result["requests"][0].vuln_id == "GHSA-abcd"
 
-    def test_no_severity_field(self):
-        data = {"vulns": [{"id": "GHSA-0000", "summary": "Minor issue"}]}
-        result = _parse_osv_response(data)
-        self.assertIsNone(result[0].severity)
+    def test_clean_package_returns_empty_list(self):
+        result = _parse_osv_response(["requests==2.28", "flask==2.0"], self._RAW)
+        assert result["flask"] == []
 
-
-class TestFetchAdvisories(unittest.TestCase):
-    @patch("depthwatch.advisories.urllib.request.urlopen")
-    def test_successful_fetch(self, mock_urlopen):
-        mock_response = MagicMock()
-        mock_response.read.return_value = json.dumps(
-            {"vulns": [{"id": "CVE-2023-0001", "summary": "Test"}]}
-        ).encode()
-        mock_response.__enter__ = lambda s: s
-        mock_response.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_response
-
-        result = fetch_advisories("somepackage", "1.0.0")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0].advisory_id, "CVE-2023-0001")
-
-    @patch("depthwatch.advisories.urllib.request.urlopen", side_effect=OSError)
-    def test_network_error_returns_empty(self, _mock):
-        result = fetch_advisories("somepackage", "1.0.0")
-        self.assertEqual(result, [])
+    def test_aliases_parsed(self):
+        result = _parse_osv_response(["requests==2.28", "flask==2.0"], self._RAW)
+        assert "CVE-2023-9999" in result["requests"][0].aliases
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestFetchAdvisories:
+    _RAW_RESP = {"results": [{"vulns": []}]}
+
+    def _mock_urlopen(self, raw):
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = json.dumps(raw).encode()
+        return mock_resp
+
+    def test_returns_dict_of_advisories(self, tmp_path):
+        with patch("depthwatch.advisories._cache.get", return_value=None), \
+             patch("depthwatch.advisories._cache.set"), \
+             patch("urllib.request.urlopen", return_value=self._mock_urlopen(self._RAW_RESP)):
+            result = fetch_advisories(["requests==2.28"])
+        assert "requests" in result
+
+    def test_uses_cache_when_available(self):
+        with patch("depthwatch.advisories._cache.get", return_value=self._RAW_RESP) as mock_get:
+            result = fetch_advisories(["requests==2.28"], use_cache=True)
+        mock_get.assert_called_once()
+        assert "requests" in result
+
+    def test_skips_cache_when_disabled(self):
+        with patch("depthwatch.advisories._cache.get") as mock_get, \
+             patch("depthwatch.advisories._cache.set"), \
+             patch("urllib.request.urlopen", return_value=self._mock_urlopen(self._RAW_RESP)):
+            fetch_advisories(["requests==2.28"], use_cache=False)
+        mock_get.assert_not_called()
